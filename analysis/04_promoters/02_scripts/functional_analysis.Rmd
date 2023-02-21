@@ -1,0 +1,369 @@
+---
+title: "Functional gene classes"
+params:
+  stage: 'L1'
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(tidyr)
+```
+
+```{r cmd-to-knit, eval=FALSE, echo=FALSE}
+
+stages = list(LE="LE",L1="L1",L3="L3")
+for (stage in names(stages))
+{
+  rmarkdown::render(input = "functional_analysis.Rmd",
+                    output_file = sprintf("%s_functional_analysis.html", stage), 
+                    output_format = "html_document", 
+                    params = list(stage=stage))
+  }
+```
+
+```{r read-classes}
+setwd("~/work/ELT-2-ChIP-revision/David/01_promoters/02_scripts/")
+classA = read.table(sprintf("../03_output/%s.promoters.hilo.classA.bed",params$stage))[[8]]
+classB = read.table(sprintf("../03_output/%s.promoters.hilo.classB.bed",params$stage))[[8]]
+classC = read.table(sprintf("../03_output/%s.promoters.hilo.classC.bed",params$stage))[[8]]
+classD = read.table(sprintf("../03_output/%s.promoters.hilo.classD.bed",params$stage))[[8]]
+
+classes = list(classA=classA,
+               classB=classB,
+               classC=classC,
+               classD=classD)
+
+all = union(c(classA,classB),c(classC,classD))
+
+notD = classes
+notD$classD = NULL
+```
+
+```{r read-gene-list}
+metabolo = read.table('../01_input/functional_gene_lists/GO_metabolic_process.txt')[[2]]
+
+locomotion = read.table('../01_input/functional_gene_lists/GO_locomotion.txt')[[2]]
+
+behavior = read.table('../01_input/functional_gene_lists/GO_behavior.txt')[[2]]
+
+immune = read.table('../01_input/functional_gene_lists/GO_immune_system_process.txt')[[2]]
+
+aging = read.table('../01_input/functional_gene_lists/GO_aging.txt')[[2]]
+
+repro = read.table('../01_input/functional_gene_lists/GO_reproductive_process.txt')[[2]]
+devel = read.table('../01_input/functional_gene_lists/GO_developmental_process.txt')[[2]]
+
+lipid = read.table('../01_input/functional_gene_lists/GO_lipid_biosynthetic_process.txt')[[2]]
+
+neuro = read.table('../01_input/functional_gene_lists/GO_nervous_system_process.txt')[[2]]
+
+txn_repress = read.table('../01_input/functional_gene_lists/GO_DNA_binding_transcription_repression.txt')[[2]]
+
+txn_reg = read.table('../01_input/functional_gene_lists/GO_transcriptional_regulator_activity.txt')[[2]]
+
+signaling = read.table('../01_input/functional_gene_lists/GO_signaling.txt')[[2]]
+
+descriptions = list(metabolo = "Metabolic process",
+                    repro = "Reproductive process",
+                    locomotion = "Locomotion",
+                    behavior = "Behavior",
+                    immune = "Immune System Process",
+                    aging = "Aging",
+                    txn_repress = "DNA Binding Transcriptional Repression",
+                    txn_reg = "Transcriptional regulator activity",
+                    neuro = "Nervous System Process",
+                    devel = "Developmental Process",
+                    lipid = "Lipid Biosynthetic Process",
+                    signaling = "Signaling"
+)
+
+# add the param$stage name to descriptions so they are in every plot
+for (desc in names(descriptions)){
+  descriptions[[desc]] = base::paste(params$stage,  descriptions[[desc]],sep=" ")
+}
+
+```
+
+
+
+```{r}
+
+metabolo = metabolo[metabolo %in% all]
+locomotion = locomotion[locomotion %in% all]
+
+behavior = behavior[behavior %in% all]
+immune = immune[immune %in% all]
+aging = aging[aging %in% all]
+repro = repro[repro %in% all]
+txn_repress = txn_repress[txn_repress %in% all]
+txn_reg = txn_reg[txn_reg %in% all]
+neuro = neuro[neuro %in% all]
+signaling = signaling[signaling %in% all]
+devel = devel[devel %in% all]
+lipid = lipid[lipid %in% all]
+
+```
+
+```{r wrapping-fxns}
+
+pempirical = function(termset, classX, classAll, greater=TRUE, N=500,cl=NULL) {
+  q = sum(classX %in% termset)
+  match_arr = classAll %in% termset
+  n_classX = length(classX)
+  message(environmentName(environment()))
+  if(!is.null(cl))
+  {
+      match_arr = classAll %in% termset
+  n_classX = length(classX)
+    clusterExport(cl, c("n_classX","match_arr"), environment())
+    clusterSetRNGStream(cl)
+    empirical=parSapply(cl, 1:N, function(i,...) { 
+      sum(sample(match_arr, n_classX, replace=F)) })
+  }
+  else{
+    empirical = replicate(N,sum(termset %in% sample(match_arr,n_classX, replace=FALSE)))  
+  }
+  
+  
+  q=sum(classX %in% termset)
+  m=sum(classAll %in% termset)
+  n=length(classAll)
+  k=length(classX)
+  
+  fisher.test(matrix(c(q,k,m,n-m),ncol=2,byrow = T))
+  
+  expected = k*(m/n)
+  
+  message(sprintf("obs %d (exp %.2f), in %d genes versus %d in %d genes (%.2f)", q,expected, k,m,n, m/n))
+  
+  conting = matrix(c(q,k,m,n),nrow=2)
+  
+  retval = list(q=q,m=m,n=n,k=k,expected=expected,N=N)
+  if(greater)
+  {
+    retval$pempir = sum(empirical >= q)/N
+    retval$phyper = phyper(q, m, n - m, k, lower.tail = F)
+    retval$pbinom = pbinom(q, length(classX), m/n, lower.tail = F)
+    retval$pfisher = fisher.test(conting, alternative="greater")$p.value
+  }else
+  {
+    retval$pempir = sum(empirical < q)/N
+    retval$phyper = phyper(q, m, n - m, k, lower.tail = T)
+    retval$pbinom = pbinom(q, length(classX), m/n, lower.tail = T)
+    retval$pfisher = fisher.test(conting, alternative="less")$p.value
+  }
+  
+  retval$dist = empirical
+  return(retval)
+}
+
+func = function(classes, pop, termset, descript,N=500) {
+  termname=substitute(termset)
+  popname = as.character(substitute(pop))
+  cat("classes versus", popname, "|", termname, "\n")
+  cat(descript[[termname]])
+  
+  classNames = list()
+  for (n in  names(classes)) { classNames[[n]] = n}
+  simulations = base::lapply(classNames, FUN=function(className){
+    cat(className,"\n")
+    classX = classes[[className]]
+    q=sum(classX %in% termset)
+    m=sum(all %in% termset)
+    n=length(pop)
+    k=length(classX)
+    
+    null.expected = k*(m/n)
+    over_rep = q > null.expected
+    pval = phyper(q, m, n-m, k, lower.tail = FALSE)
+    pval = ifelse(over_rep, pval, 1-pval)
+    cat(q,m,n,k,over_rep,pval,"\n")
+    bootstrap = replicate(N, sum(sample(classX %in% termset, length(classX), replace=T))) 
+    df = data.frame(count=bootstrap, class=className)
+    return(list(df=df,
+                null.expected=null.expected,
+                pval=pval,
+                q=q,
+                over_rep=over_rep))
+
+  })
+  
+  bigdf = rbind(simulations$classA$df,
+                simulations$classB$df,
+                simulations$classC$df,
+                simulations$classD$df
+                )
+  
+  plt = ggplot(bigdf,aes(x=count, y=class, fill=class)) + 
+    geom_boxplot() +
+    ggtitle(descript[[termname]], subtitle=sprintf("versus %s", popname)) +
+    xlab("count")
+
+  for (yval in 1:length(names(classNames))) {
+    p=simulations[[yval]]$pval
+    plt = plt + 
+      geom_point(inherit.aes=F, 
+                 data=data.frame(
+                      x=simulations[[yval]]$null.expected,
+                      y=yval), mapping=aes(x=x,y=y),color="red") +
+      geom_point(inherit.aes=F, 
+                 data=data.frame(
+                      x=simulations[[yval]]$q,
+                      y=yval), mapping=aes(x=x,y=y),color="green") +
+      geom_text(inherit.aes=F,
+                data=data.frame(
+                      x=simulations[[yval]]$q,
+                      y=yval-.4),
+                mapping=aes(x=x,
+                            y=y
+                            ),
+                label=sprintf("%s %.2e",ifelse(simulations[[yval]]$over_rep,"enrich","deplete"),p)
+                )
+  }
+  
+
+  return(plt)
+}
+```
+
+## Aging
+
+```{r run-aging}
+
+aging.output = func(notD, all, aging, descriptions)
+print(aging.output)
+```
+
+## Signaling
+
+```{r run-signaling}
+signaling.output = func(notD, all, signaling, descriptions)
+print(signaling.output)
+```
+
+## Lipid
+
+```{r run-lipid}
+lipid.output = func(notD, all, lipid, descriptions)
+print(lipid.output)
+```
+
+## Development
+
+```{r run-devel}
+devel.output = func(notD, all, devel, descriptions)
+print(devel.output)
+```
+
+## Reproductive
+
+```{r run-reproductive}
+repro.output = func(notD, all, repro, descriptions)
+print(repro.output)
+```
+
+## Immune Process
+
+```{r run-immune}
+immune.output = func(notD, all, immune, descriptions)
+print(immune.output)
+```
+
+## Metabolism
+
+```{r run-metabolo}
+metabolo.output = func(notD, all, metabolo, descriptions)
+print(metabolo.output)
+```
+
+## Locomotion
+
+```{r run-locomotion}
+locomotion.output = func(notD, all, locomotion, descriptions)
+print(locomotion.output)
+```
+
+## Behavior
+
+```{r run-behavior}
+behavior.output = func(notD, all, behavior, descriptions)
+print(behavior.output)
+```
+
+## Transcriptional Regulation
+
+```{r run-txn}
+txn_reg.output = func(notD, all, txn_reg, descriptions)
+print(txn_reg.output)
+```
+
+```{r run-txn_repress}
+txn_repress.output = func(notD, all, txn_repress, descriptions)
+print(txn_repress.output)
+```
+
+
+```{r run-neuro}
+neuro.output = func(notD, all, neuro, descriptions)
+print(neuro.output)
+```
+
+
+```{r eval=FALSE}
+
+
+
+termset = metabolo
+
+classX = classB
+
+q=sum(termset %in% classX)
+m=length(classX)
+n=length(all)
+k=length(termset)
+
+
+options(digits=4)
+cat("observed:",q)
+cat(" out of", m)
+cat(" (", q/m,") \n", sep='')
+
+cat(k, " out of ", n, " (", k/n, "), ", "expected: ", m*(k/n), sep="","\n")
+
+cat("observed/expected:",  q / (m*(k/n)), "\n" )
+cat("HyperGeometric:\n")
+cat("p of depletion:", phyper(q,m,n-k,k), "\n") # depletion
+cat("p of enrichment:", phyper(q,m,n-k,k,lower.tail = FALSE),"\n") # enrichment
+
+N = 5000
+cat(sprintf("\nEmpirical.\nRandom samples (%d) of class size out of all:\n",N))
+set.seed(0)
+empirical = replicate(N,sum(termset %in% sample(all,length(classX), replace=FALSE)))
+cat("Empirical distribution:")
+summary(empirical)
+cat(
+  sprintf("Number of times random samples contained %d hits (observed) or higher: %d", q, sum(empirical >= q)),"\n")
+
+cat("empirical p of depletion:", sum(empirical < q)/N, "\n") # depletion
+cat("empircal p of enrichment:", sum(empirical >= q)/N, "\n") # enrichment
+
+bootstrap = replicate(N, sum(sample(classX %in% termset, length(classX), replace=T)))
+summary(bootstrap)
+
+df = data.frame(count=empirical, simulation="empirical (null)")
+df = rbind(df, data.frame(count=bootstrap, simulation="bootstrap (observed)"))
+
+ggplot(df, aes(x=count, color=simulation)) + geom_boxplot()
+```
+
+```{r}
+sum(locomotion %in% classA)
+length(classA)
+length(all)
+length(locomotion)
+```

@@ -1,0 +1,107 @@
+---
+title: "elt2_promoter_regulation"
+author: "Robert Williams"
+date: "6/3/2022"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The goal of this analysis is to evaluate if there is a higher abundance of RNA-seq reads aligning to the elt-2 5'UTR or 3'UTR in elt-2(-) compared to wildtype.
+
+# ELT-2 UTR RNA-seq analysis
+
+Load libraries
+```{r}
+library(DESeq2)
+library(tidyverse)
+```
+```{r}
+
+#Load and format data
+
+utr_analysis <- function(infile){
+countsData <- read.delim(file = infile, header = TRUE, sep = "\t") %>% column_to_rownames(var = "Geneid")
+head(countsData)
+metadata1 <- c("elt2D_sorted_1",
+"elt2D_sorted_2",
+"elt2D_sorted_3",
+"elt2D_sorted_4",
+"elt2Delt7D_sorted_1",
+"elt2Delt7D_sorted_2",
+"elt2Delt7D_sorted_3",
+"wt_sorted_1",
+"wt_sorted_2",
+"wt_sorted_3",
+"wt_sorted_4",
+"elt7D_sorted_1",
+"elt7D_sorted_2",
+"elt7D_sorted_3")
+
+metadata1 <- data.frame(names = metadata1) %>% 
+  separate(names, sep = "_", into = c("genotype", "sorted", "rep"), remove = FALSE)
+  
+metadata1<- metadata1 %>% 
+  mutate(genotype = fct_relevel(genotype, c("wt", "elt7D", "elt2D", "elt2Delt7D"))) %>% 
+  arrange(genotype)
+
+countsData <- countsData %>% select(Chr:Length, metadata1$names)
+
+cts <- as.matrix(countsData %>% select(metadata1$names))
+rownames(metadata1)<- metadata1$names
+coldata <- metadata1[,c("names", "genotype", "rep")]
+rownames(coldata) <- as.vector(metadata1$names)
+all(rownames(coldata) == colnames(cts))
+
+
+# Make DESeqDataSet
+
+dds <- DESeqDataSetFromMatrix(countData = cts,
+                              colData = coldata,
+                              design = ~ rep + genotype)
+dds <- DESeq(dds)
+resultsNames(dds)
+plotCounts(dds, "WBGene00001250", intgroup = "genotype", returnData = TRUE)
+}
+```
+
+
+```{r}
+utr_elt2_reads <- bind_rows(
+data.frame(utr_analysis("../01_input/five_prime_utr_counts.txt"), type = "five_prime"),
+data.frame(utr_analysis("../01_input/three_prime_utr_counts.txt"), type = "three_prime")
+)
+```
+
+
+```{r fig.width=5, fig.height=2}
+ggplot(utr_elt2_reads, aes(x = genotype, y = count, fill = type)) +
+  geom_boxplot(position = "dodge") +
+  theme_classic()
+
+ggplot(utr_elt2_reads, aes(x = genotype, y = count, fill = type)) +
+  geom_boxplot() +
+  theme_classic() +
+  facet_grid(.~type)
+```
+```{r fig.width = 4, fig.height = 2.5}
+elt2_five_prime_reads <- ggplot(utr_elt2_reads %>% filter(type == "five_prime"), aes(x = genotype, y = count)) +
+  geom_boxplot(fill = "grey") +
+  theme_classic()
+elt2_five_prime_reads
+```
+
+```{r}
+ggsave(elt2_five_prime_reads, filename = "../03_output/elt-2_five_prime_reads.pdf", width = 4, height = 2.5)
+```
+
+
+# Session info
+
+```{r}
+sessionInfo()
+```

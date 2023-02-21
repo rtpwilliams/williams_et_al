@@ -1,0 +1,1065 @@
+---
+title: "ChIP signal in promoters"
+params:
+  stage: 'L3'
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#install.packages("devtools")
+#devtools::install_github("meekrob/ParasiteXML") # Brings biomaRt, GenomicRanges
+library(ParasiteXML)
+library(biomaRt)
+library(GenomicRanges)
+library(ggplot2)
+library(tidyr)
+#install.packages("kableExtra")
+library(kableExtra)
+library(dplyr)
+```
+
+```{r cmd-to-knit, eval=FALSE, echo=FALSE}
+
+stages = list(LE="LE",L1="L1",L3="L3")
+for (stage in names(stages))
+{
+  rmarkdown::render(input = "promoter_chip.Rmd",
+                    output_file = sprintf("%s_promoter_chip.html", stage), 
+                    output_format = "html_document", 
+                    params = list(stage=stage))
+  }
+```
+
+
+Configure all file paths based on the Rmarkdown parameter `stage` .
+
+
+
+
+```{r input-files-params}
+# things that never become expressed or bound
+# grep -f L3.classD.wbid L1.classD.wbid  > L1L3.class.wbid
+# grep -f L1L3.class.wbid LE.classD.wbid  > LEL1L3.classQ.wbid
+classQ.wbid = read.table("../03_output/LEL1L3.classQ.wbid")[[1]]
+
+#rob.dir = normalizePath('~/work/ELT-2-ChIP-revision/Rob/03_emb_L1_L3_intestine_RNAseq/03_output')
+rob.dir = normalizePath('../../../Rob/03_emb_L1_L3_intestine_RNAseq/03_output/pairwise_shrunk_DE_results')
+
+rob.files = list(LE='res_embryoGFPplus_vs_embryoGFPminus_ashr_shrunk.csv',
+                 L1='res_L1GFPplus_vs_L1GFPminus_ashr_shrunk.csv',
+                 L3='res_L3GFPplus_vs_L3GFPminus_ashr_shrunk.csv')
+
+rob.files = list(LE='res_embryoGFPplus_vs_embryoGFPminus.csv',
+                 L1='res_L1GFPplus_vs_L1GFPminus.csv',
+                 L3='res_L3GFPplus_vs_L3GFPminus.csv')
+
+
+RNASEQ = file.path(rob.dir, rob.files[[params$stage]])
+
+f = read.csv('../../../Rob/03_emb_L1_L3_intestine_RNAseq/03_output/pairwise_shrunk_DE_results/res_embryoGFPplus_vs_embryoGFPminus_ashr_shrunk.csv')
+
+UPSTREAM=1000
+DOWNSTREAM=200
+IDR_BED = sprintf("../01_input/ELT2_%s_combined_IDR.bed", params$stage) # peaks input file
+OUTPUT_03 = normalizePath("../03_output") 
+
+# output files from genomic ranges
+PROMOTOR_BED_PATH = sprintf("%s/filtered.promoters.minus%d_plus%d.bed", 
+                            OUTPUT_03, 
+                            UPSTREAM, 
+                            DOWNSTREAM)
+# colliding promoters removed
+NR_PROMOTOR_BED_PATH = sprintf("%s/nr.promoters.minus%d_plus%d.bed",
+                               OUTPUT_03, 
+                               UPSTREAM, 
+                               DOWNSTREAM)
+
+# input signal file for wiggle tool step
+SIGNAL_BW = sprintf("../01_input/ELT2_%s_combined_subtracted.bw", params$stage)
+
+INTERP_SIGNAL_BW = sprintf("../01_input/ELT2_%s_combined_subtracted.interp.bw", params$stage)
+
+# output files from wiggle tool step
+PROMOTOR_DF_PATH = sprintf("%s/%s.filtered.promoters.minus%d_plus%d.df", 
+                           OUTPUT_03, 
+                           params$stage,
+                           UPSTREAM, 
+                           DOWNSTREAM)
+
+NR_PROMOTOR_DF_PATH = sprintf("%s/%s.nr.promoters.minus%d_plus%d.df", 
+                           OUTPUT_03, 
+                           params$stage,
+                           UPSTREAM, 
+                           DOWNSTREAM)
+
+# Log conversion
+LOG_PROMOTOR_DF_PATH = sprintf("%s/log.%s.filtered.promoters.minus%d_plus%d.df", 
+                           OUTPUT_03, 
+                           params$stage,
+                           UPSTREAM, 
+                           DOWNSTREAM)
+
+IDR_DF = sprintf("../01_input/ELT2_%s_combined_IDR.df", params$stage) # peaks with signal agg
+
+```
+
+## Promoters are upstream regions of all protein-coding genes
+
+```{r get-promoters,warning=FALSE, message=T, echo=FALSE, eval=TRUE}
+
+PROMOTERS_RDS_PATH = file.path("bioMart_saved_queries", "promoters.rds")
+
+if (! file.exists(PROMOTERS_RDS_PATH)) {
+  library(biomaRt)
+  mart = getParamart()
+  
+  promoters = getCElegansPromoters(mart, upstream = UPSTREAM, downstream = DOWNSTREAM) 
+  promoters = trim(sort(promoters, ignore.strand=T)) # trim because one interval is chrIV:-359-840 at -1000/+200
+  
+  saveRDS(promoters, PROMOTERS_RDS_PATH)
+}else { 
+  message("Using saved promoter query.")
+  promoters = readRDS(PROMOTERS_RDS_PATH)
+}
+
+head(promoters)
+```
+
+```{r filter-collisions,echo=FALSE, eval=FALSE}
+selfOverlaps = findOverlaps(promoters, ignore.strand=T)
+#head(selfOverlaps)
+
+# selfOverlaps includes everything against itself + overlaps between promoters
+# Filter out the self hits, and retain the "between" hits as "collisions".
+collisions = selfOverlaps[!isSelfHit(selfOverlaps)]
+
+overlappingPromoterRows = unique(c( from(collisions), to(collisions)))
+length(overlappingPromoterRows)
+sprintf("There are %d overlaps between %d promoters.", length(collisions), length(overlappingPromoterRows))
+
+filtered.promoters = promoters[-which(seqnames(promoters) == 'chrM')]
+
+# to remove overlapping promoters, uncomment below
+nr.promoters = filtered.promoters[-overlappingPromoterRows]
+sprintf("There are %d unambiguous promoters.", length(nr.promoters))
+
+# -500,+200
+# "There are 4256 overlaps between 4067 promoters."
+# "There are 15922 unambiguous promoters."
+
+# -1000,+200
+#"There are 8008 overlaps between 6749 promoters."
+#"There are 13246 unambiguous promoters."
+
+write.table(filtered.promoters, PROMOTOR_BED_PATH, sep="\t", quote=F, row.names=F, col.names=F)
+write.table(nr.promoters, NR_PROMOTOR_BED_PATH, sep="\t", quote=F, row.names=F, col.names=F)
+```
+
+# Aggregate signal using wiggletools
+
+Install a conda environment containing wiggletools and ucsc user apps via `root/David/01_promoters/02_scripts/conda_envs/elt-2-rev.yaml`
+
+```{r set-up-bash}
+
+Sys.setenv(PROMOTOR_BED_PATH=PROMOTOR_BED_PATH, # all promoters
+           NR_PROMOTOR_BED_PATH = NR_PROMOTOR_BED_PATH, # overlapping removed
+           IDR_BED = IDR_BED, 
+           IDR_DF = IDR_DF, 
+           SIGNAL_BW = SIGNAL_BW,
+           PROMOTOR_DF_PATH = PROMOTOR_DF_PATH,
+           NR_PROMOTOR_DF_PATH = NR_PROMOTOR_DF_PATH,
+           STAGE=params$stage
+           )
+```
+
+Run wiggletools in a bash session.
+
+```{bash run-wiggle-tools, eval=FALSE, echo=FALSE}
+source $HOME/.bash_profile
+conda activate elt-2-rev
+
+set -ue # exit 1 if any vars are not set (using Sys.setenv above)
+echo PROMOTOR_BED_PATH $PROMOTOR_BED_PATH
+echo NR_PROMOTOR_BED_PATH $NR_PROMOTOR_BED_PATH
+echo NR_PROMOTOR_DF_PATH $NR_PROMOTOR_DF_PATH
+echo IDR_BED $IDR_BED
+echo IDR_DF $IDR_DF
+echo SIGNAL_BW $SIGNAL_BW
+echo STAGE $STAGE
+
+#wiggletools
+wiggletools apply_paste - meanI maxI $PROMOTOR_BED_PATH $SIGNAL_BW > $PROMOTOR_DF_PATH
+echo $PROMOTOR_DF_PATH
+head -5 $PROMOTOR_DF_PATH
+
+wiggletools apply_paste - meanI maxI $NR_PROMOTOR_BED_PATH $SIGNAL_BW > $NR_PROMOTOR_DF_PATH
+echo $NR_PROMOTOR_DF_PATH
+head -5 $NR_PROMOTOR_DF_PATH
+
+wiggletools apply_paste - meanI maxI $IDR_BED $SIGNAL_BW > $IDR_DF
+echo $IDR_DF
+head -5 $IDR_DF
+```
+
+# Read-in aggregated signal data
+
+Read in the results of the wiggletools commands.
+
+```{r read-calculated-data, warning=FALSE}
+
+promoters.agg = read.table(PROMOTOR_DF_PATH)
+colnames(promoters.agg) <- c("chrom", "start","end","len", "strand", "wbps_gene_id", "gene_name", "chip_signal_mean", "chip_signal_max")
+
+IDR_peaks.agg = read.table(IDR_DF)
+
+IDR_peaks.agg$V4 = NULL
+IDR_peaks.agg$V5 = NULL
+IDR_peaks.agg$V6 = NULL
+IDR_peaks.agg$V8 = NULL
+colnames(IDR_peaks.agg) <- c("chrom", "start","end","intensity","nlogq","offset","signal.mean","signal.max")
+
+gr.IDR = makeGRangesFromDataFrame(IDR_peaks.agg,keep.extra.columns = T)
+seqinfo(gr.IDR) <- Seqinfo(genome="ce11")
+gr.IDR$signal.sum = width(gr.IDR )*gr.IDR$signal.mean
+
+
+gr.promoters = makeGRangesFromDataFrame(promoters.agg,keep.extra.columns = T)
+seqinfo(gr.promoters) <- Seqinfo(genome="ce11")
+```
+
+Attach log scale promoter signal values.
+
+```{r promoter-signal-values, warning=FALSE}
+chipmean.minval = min(gr.promoters$chip_signal_mean,na.rm=T)
+chipmean.minval
+chipmax.minval = min(gr.promoters$chip_signal_max,na.rm=T)
+chipmax.minval
+chipmean.log = log(-chipmean.minval + 1 + gr.promoters$chip_signal_mean,base=2)
+chipmax.log = log(-chipmax.minval + 1 + gr.promoters$chip_signal_max,base=2)
+
+gr.promoters$log_chip_signal_mean = chipmean.log
+gr.promoters$log_chip_signal_max = chipmax.log
+head(gr.promoters)
+
+# output file
+LOG_PROMOTOR_DF_PATH = sprintf("%s/log_%s_filtered.promoters.minus%d_plus%d.df", OUTPUT_03, params$stage, UPSTREAM, DOWNSTREAM)
+write.table(as.data.frame(gr.promoters), file = LOG_PROMOTOR_DF_PATH,quote=F, row.names=F,sep="\t")
+```
+
+Find overlaps between promoters and IDR peaks. Populate IDR signal fields when a peak exists, leave NaN otherwise.
+
+```{r merge-promoters-peaks}
+laps = findOverlaps(gr.promoters,gr.IDR, ignore.strand=T,minoverlap = 100)
+
+sprintf("%d/%d (%.1f) promoters have a peak.", length(unique(from(laps))), laps@nLnode,
+                                               length(unique(from(laps)))/ laps@nLnode)
+
+sprintf("%d/%d (%.1f) peaks are in promoters", length(unique(to(laps))), laps@nRnode,
+                                               length(unique(to(laps)))/ laps@nRnode)
+
+gr.promoters$IDR_mean = NaN
+gr.promoters$IDR_max = NaN
+gr.promoters$IDR_value = NaN
+gr.promoters$nlogq = NaN
+gr.promoters$IDR_sum = NaN
+gr.promoters[from(laps)]$IDR_max = gr.IDR[to(laps)]$signal.max
+gr.promoters[from(laps)]$IDR_mean = gr.IDR[to(laps)]$signal.mean
+gr.promoters[from(laps)]$IDR_value = gr.IDR[to(laps)]$intensity
+gr.promoters[from(laps)]$IDR_sum = gr.IDR[to(laps)]$signal.sum
+gr.promoters[from(laps)]$nlogq = gr.IDR[to(laps)]$nlogq
+print("Number of promoters overlapping an IDR peak:")
+sum(!is.nan(gr.promoters$IDR_max))
+
+
+
+```
+
+```{r IDR-score-values}
+
+# the density/distribution of the non-transformed values is too thin to
+# show on the graph, so this is commented out. If you want to see the distribution, 
+# uncomment the ecdf plots.
+idr.nonlog = as.data.frame(gr.promoters) %>% filter(is.finite(IDR_value)) %>% dplyr::select('IDR_value','IDR_mean','IDR_max','IDR_sum') %>% gather(key="dataset") 
+
+# ggplot(idr.nonlog, aes(x=value, fill=dataset))  + geom_density(alpha=.5) + labs(title="Distributions of NON-Log transformed ChIP signal values in peaks")
+# 
+# idr.val.ecdf = ecdf(gr.promoters$IDR_value)
+# idr.mean.ecdf = ecdf(gr.promoters$IDR_mean)
+# idr.max.ecdf = ecdf(gr.promoters$IDR_max)
+# 
+# plot(idr.val.ecdf)
+# lines(idr.mean.ecdf,col="blue")
+# lines(idr.max.ecdf,col="red")
+
+# the data currently have all positive values, so no adjustment made for log
+idr.val.log = log10(gr.promoters$IDR_value)
+idr.mean.log = log10(gr.promoters$IDR_mean)
+idr.max.log = log10(gr.promoters$IDR_max)
+idr.sum.log = log10(gr.promoters$IDR_sum)
+
+# idr.val.log.ecdf = ecdf(idr.val.log)
+# idr.mean.log.ecdf = ecdf(idr.mean.log) 
+# idr.max.log.ecdf = ecdf(idr.max.log)
+# 
+# plot(idr.val.log.ecdf)
+# lines(idr.mean.log.ecdf,col="blue")
+# lines(idr.max.log.ecdf,col="red")
+
+log.vals = data.frame(idr.mean = idr.mean.log, idr.val = idr.val.log, idr.max = idr.max.log, idr.sum = idr.sum.log)
+
+long.log.vals = gather(log.vals, key="dataset")
+head(long.log.vals)
+ggplot(long.log.vals, aes(x=value, fill=dataset))  + geom_density(alpha=.5) + labs(title=sprintf("Distributions of log10 transformed IDR values for %s",params$stage))
+
+gr.promoters$IDR_logTEN_max = idr.max.log
+gr.promoters$IDR_logTEN_mean = idr.mean.log
+gr.promoters$IDR_logTEN_value = idr.val.log
+gr.promoters$IDR_logTEN_sum = idr.sum.log
+
+
+
+extremes = gr.promoters$IDR_logTEN_sum > 5
+extremes[is.na(extremes)] <- FALSE
+gr.extremes = gr.promoters[extremes]
+gr.extremes = gr.extremes[order(gr.extremes$IDR_logTEN_sum, decreasing = T)]
+head(gr.extremes)
+```
+
+Read in RNA-seq data, join promoters by wbps geneid, and then sort logFoldChange high to low.
+
+```{r rob-combine}
+# input file
+rnaseq = read.csv(RNASEQ)
+rownames(rnaseq) <- rnaseq$WBGeneID
+
+mcols(gr.promoters) <- mcols(gr.promoters) %>% 
+  cbind(rnaseq[gr.promoters$wbps_gene_id,2:6])  %>% 
+  as.data.frame() %>% 
+  dplyr::rename(IDR_nlogq = nlogq)
+
+names(gr.promoters) <- gr.promoters$wbps_gene_id
+
+# sort promoters high to low by log2FC
+gr.promoters = gr.promoters[order(gr.promoters$log2FoldChange,decreasing=T)]
+
+gr.promoters[,2:5]
+```
+
+```{r rnaseq-pvalue-na}
+# look at the number filtered by DESeq2
+# as described by https://bioconductor.org/packages/release/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#pvaluesNA
+baseMean_is_zero = rnaseq$baseMean == 0
+pval_na = is.na(rnaseq$pvalue)
+padj_na = is.na(rnaseq$padj)
+# case one
+sum(baseMean_is_zero & pval_na & padj_na)
+
+# case two
+sum(!baseMean_is_zero & pval_na & padj_na)
+
+# case three
+sum(!pval_na & padj_na)
+```
+
+```{r make-classes-ABCD}
+# divide groups by peak and padj
+enriched_intestine = gr.promoters$padj<.05 & !is.na(gr.promoters$padj) & gr.promoters$log2FoldChange > 0
+has_peak = !is.nan(gr.promoters$IDR_max)
+classA = enriched_intestine & has_peak
+classB = !enriched_intestine & has_peak
+classC = enriched_intestine & !has_peak
+classD = !enriched_intestine & !has_peak
+
+m = matrix( c(sum(classA),
+            sum(classB),
+            sum(classC),
+            sum(classD)), ncol = 2, byrow = T)
+colnames(m) <- c("Peak","NO peak")
+rownames(m) <- c("Int. expressed","NOT Int. expressed")
+m
+m.chisq = chisq.test(m)
+m.chisq
+
+display_table = rbind(m,m.chisq$expected)
+pval.label=ifelse(m.chisq$p.value <2e-16, "<2e-16", sprintf("%.3f", .chisq$p.value))
+knitr::kable(display_table, 
+             digits = 1,
+             format.args=list(big.mark = ','),
+             caption=sprintf("%s: Chi-sq p-val: %s",
+                                params$stage, 
+                                pval.label)) %>% 
+      pack_rows(index = c("Observed" = 2, "Expected" = 2)) %>%
+      kable_styling(latex_options = "scale_down")
+
+
+
+gr.promoters$class = "classA"
+gr.promoters$class[classB] <- "classB"
+gr.promoters$class[classC] <- "classC"
+gr.promoters$class[classD] <- "classD"
+```
+
+
+```{r logistic-regression-chip}
+sigmoid = function(z) {1 / (1 + exp(-z))}
+
+dataset = as.data.frame(mcols(gr.promoters))
+dataset$enriched = ifelse( dataset$padj < .05, 1, 0)
+dataset = dataset %>% dplyr::filter(is.finite(enriched)) %>% arrange(log_chip_signal_mean)
+
+#dataset = dataset[11:(nrow(dataset)-10),]
+
+
+mod = glm(enriched ~ log_chip_signal_max, data=dataset[11:(nrow(dataset)-10),], family = "binomial")
+dataset$prediction = sigmoid(predict(mod,newdata=dataset))
+
+curve = data.frame(
+  log_chip_signal_max=seq(
+    min(dataset$log_chip_signal_max),
+    max(dataset$log_chip_signal_max),
+    length.out=50))
+curve$y = sigmoid(predict(mod, newdata=curve))
+
+
+dataset=dataset %>% arrange(log_chip_signal_max)
+ggplot(dataset[11:(nrow(dataset)-10),], aes(x=log_chip_signal_max, y=enriched)) + 
+  geom_jitter(alpha=.1) + 
+  geom_line(data=curve, aes(x=log_chip_signal_max, y=y),inherit.aes=F) +
+  labs(title=sprintf("%s: Does promoter signal max predict intestine expression?",params$stage),
+       y="pr(intestine enriched)")
+
+
+mod = glm(enriched ~ log_chip_signal_mean, data=dataset[11:(nrow(dataset)-10),], family = "binomial")
+dataset$prediction = sigmoid(predict(mod,newdata=dataset))
+
+curve = data.frame(
+  log_chip_signal_mean=seq(
+    min(dataset$log_chip_signal_mean),
+    max(dataset$log_chip_signal_mean),
+    length.out=50))
+curve$y = sigmoid(predict(mod, newdata=curve))
+
+dataset=dataset %>% arrange(log_chip_signal_mean)
+ggplot(dataset[11:(nrow(dataset)-10),], aes(x=log_chip_signal_mean, y=enriched)) + 
+  geom_point(alpha=.1) + 
+  geom_line(data=curve, aes(x=log_chip_signal_mean, y=y),inherit.aes=F) +
+  labs(title=sprintf("%s: Does promoter signal mean/sum predict intestine expression?",params$stage),y="pr(intestine enriched)") 
+
+```
+```{r ROC}
+ROC = function(scores, truth) {
+  nPos = sum(truth)
+  nNeg = sum(!truth)
+  
+  # True negatives
+  TN = function(i) {
+    ecdf(scores[!truth])(i) * nNeg
+  }
+  # False negatives
+  FN = function(i) {
+    ecdf(scores[truth])(i) * nPos
+  }
+  # False positives
+  FP = function(i) {
+    nNeg - TN(i)
+  }
+  # True positives
+  TP = function(i) {
+    nPos - FN(i)
+  }
+  FPR = function(i) {
+    FP(i)/(FP(i) + TN(i))
+  }
+  # Sensitivity
+  Sn = function(i) {
+    TP(i)/(TP(i) + FN(i)) # efficiency of recovering True Positives
+  }
+  Sp = function(i) {
+    TN(i)/(TN(i) + FP(i)) # success at excluding set B (True Negatives)
+  }
+  # Positive predictive value
+  PPV = function(i) {
+    TP(i)/(TP(i) + FP(i)) # proportion of called positives that are correct
+  }
+  # False positive rate
+  FPR = function(i) {
+    FP(i)/(FP(i)+TN(i)) # failure to exclude set B (True Negatives)
+  }
+  list(Sp=Sp,Sn=Sn,TP=TP,FP=FP,TN=TN,FN=FN,PPV=PPV,TPR=Sn,FPR=FPR)
+}
+
+dataset = as.data.frame(mcols(gr.promoters[classA|classB]) )
+dataset = dataset[order(dataset$IDR_logTEN_sum),]
+dataset$class = factor(dataset$class, levels=c("classA","classB"))
+
+```
+
+```{r ROC-plots-IDR-sum}
+thresholds = seq(min(dataset$IDR_logTEN_sum), max(dataset$IDR_logTEN_sum), length.out = 100)
+
+
+ROC.IDR.sum = ROC(dataset$IDR_logTEN_sum, dataset$class == 'classA')
+TPR=ROC.IDR.sum$TPR
+FPR=ROC.IDR.sum$FPR
+TP = ROC.IDR.sum$TP
+FP = ROC.IDR.sum$FP
+
+TPRvsFPR = TPR(thresholds) - FPR(thresholds)
+best=max(TPRvsFPR)
+best_threshold = thresholds[ which(TPRvsFPR == best)]
+
+ggplot(data.frame(threshold=thresholds,TPRvsFPR=TPRvsFPR), 
+       aes(x=threshold,y=TPRvsFPR)) + 
+  geom_line() +
+  geom_vline(xintercept=best_threshold) +
+  ggtitle(sprintf("%s: Using IDR sum score to recover classA (TPR) \nand exclude classB (FPR) ", params$stage)) + ylab("TPR - FPR")
+
+
+df = data.frame()
+for (funcname in names(ROC.IDR.sum)) {
+  f = ROC.IDR.sum[[funcname]]
+  df = df %>% rbind(  data.frame(threshold=thresholds,measure=funcname,value=f(thresholds)))
+}
+df2 = df %>% filter(measure %in% c("TPR","FPR"))
+df2$measure = factor(df2$measure, levels=c("TPR","FPR"))             
+ggplot(df2, aes(x=threshold,y=value, color=measure)) + geom_line() +
+  scale_color_manual(values=c("black","red")) +
+  geom_segment(x=best_threshold,xend=best_threshold,
+               y=FPR(best_threshold), yend=TPR(best_threshold),color='black') +
+  geom_point(x=best_threshold, y=TPR(best_threshold), color="black", size=.75) +
+  geom_point(x=best_threshold, y=FPR(best_threshold), color="black", size=.75) +
+  ggtitle("Positive predictive value of using peak signal to predict binding") +
+  geom_text(inherit.aes=F,aes(x=best_threshold, y=TPR(best_threshold)), 
+            position=position_nudge(x=.6), label=sprintf("recover: %d/%d classA\nexclude: %d/%d classB", TP(best_threshold),sum(dataset$class == 'classA'), FP(best_threshold),sum(dataset$class == 'classB')))
+
+data.frame(IDR_sum=thresholds, TPR=ROC.IDR.sum$TPR(thresholds), FPR=ROC.IDR.sum$FPR(thresholds)) %>%
+  ggplot(aes(x=FPR,y=TPR)) + geom_line() +
+  geom_point(x=FPR(best_threshold),y=TPR(best_threshold), size=.75) +
+  geom_abline(slope=1) + ggtitle("ROC for IDR sum")
+
+ROC.df = data.frame(TPR=ROC.IDR.sum$TPR(thresholds),FPR=ROC.IDR.sum$FPR(thresholds),score="IDR sum")
+IDR_SUM_BEST = which(thresholds == best_threshold)
+```
+
+```{r ROC-plots-IDR-max}
+thresholds = seq(min(dataset$IDR_logTEN_max), max(dataset$IDR_logTEN_max), length.out = 100)
+
+
+ROC.IDR.max = ROC(dataset$IDR_logTEN_max, dataset$class == 'classA')
+TPR=ROC.IDR.max$TPR
+FPR=ROC.IDR.max$FPR
+TP = ROC.IDR.max$TP
+FP = ROC.IDR.max$FP
+
+TPRvsFPR = TPR(thresholds) - FPR(thresholds)
+best=max(TPRvsFPR)
+best_threshold = thresholds[ which(TPRvsFPR == best)]
+
+ggplot(data.frame(threshold=thresholds,TPRvsFPR=TPRvsFPR), 
+       aes(x=threshold,y=TPRvsFPR)) + 
+  geom_line() +
+  geom_vline(xintercept=best_threshold) +
+  ggtitle(sprintf("%s: Using IDR max score to recover classA (TPR) \nand exclude classB (FPR) ", params$stage)) + ylab("TPR - FPR")
+
+
+df = data.frame()
+for (funcname in names(ROC.IDR.max)) {
+  f = ROC.IDR.max[[funcname]]
+  df = df %>% rbind(  data.frame(threshold=thresholds,measure=funcname,value=f(thresholds)))
+}
+df2 = df %>% filter(measure %in% c("TPR","FPR"))
+df2$measure = factor(df2$measure, levels=c("TPR","FPR"))             
+ggplot(df2, aes(x=threshold,y=value, color=measure)) + geom_line() +
+  scale_color_manual(values=c("black","red")) +
+  geom_segment(x=best_threshold,xend=best_threshold,
+               y=FPR(best_threshold), yend=TPR(best_threshold),color='black') +
+  geom_point(x=best_threshold, y=TPR(best_threshold), color="black", size=.75) +
+  geom_point(x=best_threshold, y=FPR(best_threshold), color="black", size=.75) +
+  ggtitle("Positive predictive value of using peak signal to predict binding") +
+  geom_text(inherit.aes=F,aes(x=best_threshold, y=TPR(best_threshold)), 
+            position=position_nudge(x=.6), label=sprintf("recover: %d/%d classA\nexclude: %d/%d classB", 
+                   round(TP(best_threshold)),
+                   sum(dataset$class == 'classA'), 
+                   round(FP(best_threshold)),
+                   sum(dataset$class == 'classB')))
+
+data.frame(IDR_max=thresholds, TPR=ROC.IDR.max$TPR(thresholds), FPR=ROC.IDR.max$FPR(thresholds)) %>%
+  ggplot(aes(x=FPR,y=TPR)) + geom_line() +
+  geom_point(x=FPR(best_threshold),y=TPR(best_threshold), size=.75) +
+  geom_abline(slope=1)
+
+ROC.df = ROC.df %>% 
+  rbind(data.frame(TPR=ROC.IDR.max$TPR(thresholds),FPR=ROC.IDR.max$FPR(thresholds),score="IDR max"))
+IDR_MAX_BEST = which(thresholds == best_threshold)
+
+ggplot(ROC.df, aes(x=FPR,y=TPR, color=score)) + geom_line() + geom_abline(slope=1)
+```
+```{r ROC-IDR-value}
+thresholds = seq(min(dataset$IDR_logTEN_value), max(dataset$IDR_logTEN_value), length.out = 100)
+
+
+ROC.IDR.value = ROC(dataset$IDR_logTEN_value, dataset$class == 'classA')
+TPR=ROC.IDR.value$TPR
+FPR=ROC.IDR.value$FPR
+TP = ROC.IDR.value$TP
+FP = ROC.IDR.value$FP
+
+TPRvsFPR = TPR(thresholds) - FPR(thresholds)
+best=max(TPRvsFPR)
+best_threshold = thresholds[ which(TPRvsFPR == best)]
+
+ROC.df = ROC.df %>% 
+  rbind(data.frame(TPR=ROC.IDR.value$TPR(thresholds),FPR=ROC.IDR.value$FPR(thresholds),score="IDR value"))
+IDR_VALUE_BEST = which(thresholds == best_threshold)
+
+ggplot(ROC.df, aes(x=FPR,y=TPR, color=score)) + geom_line() + geom_abline(slope=1) + ggtitle(sprintf("%s: ROC predictive power of IDR score to predict intestine expression", params$stage))
+```
+
+
+
+```{r ROC-IDR-mean}
+thresholds = seq(min(dataset$IDR_logTEN_mean), max(dataset$IDR_logTEN_mean), length.out = 100)
+
+
+ROC.IDR.mean = ROC(dataset$IDR_logTEN_mean, dataset$class == 'classA')
+TPR=ROC.IDR.mean$TPR
+FPR=ROC.IDR.mean$FPR
+TP = ROC.IDR.mean$TP
+FP = ROC.IDR.mean$FP
+
+TPRvsFPR = TPR(thresholds) - FPR(thresholds)
+best=max(TPRvsFPR)
+best_threshold = thresholds[ which(TPRvsFPR == best)]
+
+ROC.df = ROC.df %>% 
+  rbind(data.frame(TPR=ROC.IDR.mean$TPR(thresholds),FPR=ROC.IDR.mean$FPR(thresholds),score="IDR mean"))
+IDR_MEAN_best = which(thresholds == best_threshold)
+
+ggplot(ROC.df, aes(x=FPR,y=TPR, color=score)) + geom_line() + geom_abline(slope=1) + ggtitle(sprintf("%s ROC: predictive power of IDR score to predict intestine expression", params$stage))
+
+kable(ROC.df %>% group_by(score) %>% summarize(best = max(TPR-FPR)), caption=sprintf("%s best TPR-FPR", params$stage), digits=3)
+```
+
+```{r discriminative-fractions}
+library(MASS)
+
+# IDR sum in peak
+classAB.lda = lda(as.matrix(dataset$IDR_logTEN_sum), dataset$class)
+dataset$IDR_logTEN_sum.ghat = predict(classAB.lda)$class
+mean(dataset$IDR_logTEN_sum.ghat != dataset$class)
+ggplot(dataset, aes(x=IDR_logTEN_sum, fill=class)) + geom_density(alpha=.5)
+
+
+ggplot(dataset, aes(x=IDR_logTEN_mean, fill=class)) + geom_density(alpha=.5)
+
+classAB.lda = lda(as.matrix(dataset$IDR_logTEN_max), dataset$class)
+dataset$IDR_logTEN_max.ghat = predict(classAB.lda)$class
+
+mean(dataset$IDR_logTEN_max.ghat != dataset$class)
+changepoint = dataset %>% filter(IDR_logTEN_max.ghat == 'classB') %>% pull(IDR_logTEN_max) %>% max()
+
+total_greater_changepoint = dataset %>% 
+  filter(IDR_logTEN_max > changepoint) %>% 
+  nrow()
+frac = dataset %>% filter(IDR_logTEN_max > changepoint) %>% 
+  group_by(class) %>% 
+  summarize(count=n(), frac=n()/total_greater_changepoint) %>% 
+  filter(class == "classA") %>% pull(frac)
+
+ggplot(dataset, aes(x=IDR_logTEN_max, fill=class)) + 
+  geom_density(alpha=.5) + 
+  geom_vline(xintercept=changepoint) + 
+  scale_fill_brewer(palette="Spectral")
+
+dataset=dataset %>% arrange(IDR_logTEN_max)
+isClassA = dataset$class == "classA"
+incrClassA = cumsum(isClassA)
+incrClassB = cumsum(!isClassA)
+dataset$incrClassA = incrClassA
+dataset$incrClassB = incrClassB
+dataset$fClassA = incrClassA/(1:nrow(dataset))
+ggplot(dataset, aes(x=IDR_logTEN_max, y=incrClassA)) + geom_line() + geom_line(aes(y=incrClassB),color='orange')
+
+thresholds = seq(min(dataset$IDR_logTEN_max), max(dataset$IDR_logTEN_max), length.out=24)
+f.all = function(x) { 1-ecdf(dataset$IDR_logTEN_max)(x) } 
+called_positives = f.all(thresholds)*nrow(dataset)
+f.classA = function(x) {1-ecdf(dataset$IDR_logTEN_max[dataset$class == 'classA'])(x)}
+actual_positives = f.classA(thresholds)*sum(dataset$class == 'classA')
+
+
+
+```
+
+```{r logistic-regression-chip-peak}
+dataset$enriched = ifelse( dataset$padj < .05, 1, 0)
+
+dataset = dataset %>% filter(is.finite(enriched)) %>% arrange(IDR_logTEN_sum)
+
+mod = glm(enriched ~ IDR_logTEN_sum, data=dataset[11:(nrow(dataset)-10),], family = "binomial")
+
+curve = data.frame(
+  IDR_logTEN_sum=seq(
+    min(dataset$IDR_logTEN_sum),
+    max(dataset$IDR_logTEN_sum),
+    length.out=50))
+curve$y = sigmoid(predict(mod, newdata=curve))
+
+dataset$prediction = sigmoid(predict(mod, newdata=dataset))
+dataset=dataset %>% arrange(IDR_logTEN_sum)
+ggplot(dataset, aes(x=IDR_logTEN_sum, y=enriched)) + 
+  geom_point(alpha=.3) + 
+  geom_line(data=curve, aes(x=IDR_logTEN_sum, y=y),inherit.aes=F) +  labs(title=sprintf("%s: Does peak signal sum predict intestine expression?",params$stage), y="pr(intestine enriched)")
+
+
+mod = glm(enriched ~ IDR_logTEN_mean, data=dataset[11:(nrow(dataset)-10),], family = "binomial")
+
+curve = data.frame(
+  IDR_logTEN_mean=seq(
+    min(dataset$IDR_logTEN_mean),
+    max(dataset$IDR_logTEN_mean),
+    length.out=50))
+curve$y = sigmoid(predict(mod, newdata=curve))
+
+dataset$prediction = sigmoid(predict(mod,newdata=dataset))
+dataset=dataset %>% arrange(IDR_logTEN_mean)
+ggplot(dataset, aes(x=IDR_logTEN_mean, y=enriched)) + 
+  geom_point(alpha=.3) + 
+  geom_line(data=curve, aes(x=IDR_logTEN_mean, y=y),inherit.aes=F) + 
+  labs(title=sprintf("%s: Does peak signal mean predict intestine expression?",params$stage),y="pr(intestine enriched)")
+
+mod = glm(enriched ~ IDR_logTEN_max, data=dataset, family = "binomial")
+
+curve = data.frame(
+  IDR_logTEN_max=seq(
+    min(dataset$IDR_logTEN_max),
+    max(dataset$IDR_logTEN_max),
+    length.out=50))
+curve$y = sigmoid(predict(mod, newdata=curve))
+
+dataset$prediction = sigmoid(predict(mod))
+dataset=dataset %>% arrange(IDR_logTEN_max)
+ggplot(dataset, aes(x=IDR_logTEN_max, y=enriched)) + 
+  geom_point(alpha=.3) + 
+    geom_line(data=curve, aes(x=IDR_logTEN_max, y=y),inherit.aes=F) + 
+  labs(title=sprintf("%s: Does peak signal max predict intestine expression?",params$stage),y="pr(intestine enriched)")
+
+mod = glm(enriched ~ IDR_logTEN_value, data=dataset, family = "binomial")
+
+curve = data.frame(
+  IDR_logTEN_value=seq(
+    min(dataset$IDR_logTEN_value),
+    max(dataset$IDR_logTEN_value),
+    length.out=50))
+curve$y = sigmoid(predict(mod, newdata=curve))
+
+dataset$prediction = sigmoid(predict(mod))
+dataset=dataset %>% arrange(IDR_logTEN_value)
+ggplot(dataset, aes(x=IDR_logTEN_value, y=enriched)) + 
+  geom_point(alpha=.3) + 
+      geom_line(data=curve, aes(x=IDR_logTEN_value, y=y),inherit.aes=F) +
+  labs(title=sprintf("%s: Does peak IDR value predict intestine expression?",params$stage), y="pr(intestine enriched)")
+
+```
+
+```{r make-classes-hilo}
+promoters.hilo = as.data.frame(gr.promoters)
+
+PROMOTERS_HILO_BED_PATH = file.path(OUTPUT_03, sprintf("%s.promoters.hilo.bed", params$stage))
+PROMOTERS_HILO_TSV_PATH = file.path(OUTPUT_03, sprintf("%s.promoters.hilo.tsv", params$stage))
+PROMOTERS_HILO_BED_PATH_A = file.path(OUTPUT_03, sprintf("%s.promoters.hilo.classA.bed", params$stage))
+PROMOTERS_HILO_BED_PATH_B = file.path(OUTPUT_03, sprintf("%s.promoters.hilo.classB.bed", params$stage))
+PROMOTERS_HILO_BED_PATH_C = file.path(OUTPUT_03, sprintf("%s.promoters.hilo.classC.bed", params$stage))
+PROMOTERS_HILO_BED_PATH_D = file.path(OUTPUT_03, sprintf("%s.promoters.hilo.classD.bed", params$stage))
+
+
+# BED format
+write.table(promoters.hilo, PROMOTERS_HILO_BED_PATH, quote=F, sep="\t", row.names=F, col.names=F)
+
+# Matrix format readable into R
+write.table(promoters.hilo, PROMOTERS_HILO_TSV_PATH, quote=F, sep="\t", row.names=T, col.names=T)
+
+write.table(promoters.hilo[classA,], 
+            PROMOTERS_HILO_BED_PATH_A, quote=F, sep="\t", row.names=F, col.names=F)
+write.table(promoters.hilo[classB,], 
+            PROMOTERS_HILO_BED_PATH_B, quote=F, sep="\t", 
+row.names=F, col.names=F)
+write.table(promoters.hilo[classC,], 
+            PROMOTERS_HILO_BED_PATH_C, quote=F, sep="\t", 
+row.names=F, col.names=F)
+write.table(promoters.hilo[classD,], 
+            PROMOTERS_HILO_BED_PATH_D, quote=F, sep="\t", 
+row.names=F, col.names=F)
+
+#### deeptooling up versus down only, no other filters
+promoters.hilo.up = promoters.hilo %>% dplyr::filter(log2FoldChange > 0)
+promoters.hilo.down = promoters.hilo %>% dplyr::filter(log2FoldChange < 0)
+
+PROMOTERS_HILO_BED_PATH_UP = file.path(OUTPUT_03, 
+                                       sprintf("%s.promoters.hilo.up.bed",params$stage))
+PROMOTERS_HILO_BED_PATH_DOWN = file.path(OUTPUT_03, 
+                                         sprintf("%s.promoters.hilo.down.bed",params$stage))
+
+write.table(promoters.hilo.up, 
+            PROMOTERS_HILO_BED_PATH_UP, 
+            quote=F, 
+            sep="\t", 
+row.names=F, col.names=F)
+
+write.table(promoters.hilo.down, 
+            PROMOTERS_HILO_BED_PATH_DOWN, 
+            quote=F, 
+            sep="\t", 
+row.names=F, col.names=F)
+
+```
+
+```{r make-wtf-classes}
+wtf.wbid = read.table('../01_input/wtf3.wbid')[[1]]
+in_WTF = gr.promoters$wbps_gene_id %in% wtf.wbid 
+
+PROMOTERS_HILO_BED_PATH_A_TF = file.path(OUTPUT_03, sprintf("%s.promoters.hilo.classA.TF.bed", params$stage))
+PROMOTERS_HILO_BED_PATH_B_TF = file.path(OUTPUT_03, sprintf("%s.promoters.hilo.classB.TF.bed", params$stage))
+PROMOTERS_HILO_BED_PATH_C_TF = file.path(OUTPUT_03, sprintf("%s.promoters.hilo.classC.TF.bed", params$stage))
+PROMOTERS_HILO_BED_PATH_D_TF = file.path(OUTPUT_03, sprintf("%s.promoters.hilo.classD.TF.bed", params$stage))
+
+write.table(promoters.hilo[classA&in_WTF,], 
+            PROMOTERS_HILO_BED_PATH_A_TF, quote=F, sep="\t", row.names=F, col.names=F)
+write.table(promoters.hilo[classB&in_WTF,], 
+            PROMOTERS_HILO_BED_PATH_B_TF, quote=F, sep="\t", 
+row.names=F, col.names=F)
+write.table(promoters.hilo[classC&in_WTF,], 
+            PROMOTERS_HILO_BED_PATH_C_TF, quote=F, sep="\t", 
+row.names=F, col.names=F)
+write.table(promoters.hilo[classD&in_WTF,], 
+            PROMOTERS_HILO_BED_PATH_D_TF, quote=F, sep="\t", 
+row.names=F, col.names=F)
+
+```
+
+To produce the deeptools output, execute DEEPTOOLS.bash.
+
+It will compute promoters.hilo.mx and promoters.hilo.pdf.
+
+Deeptools PDFs indicate a font called dejavu, if you're tired of replacing it in Illustrator, install it from: <https://sourceforge.net/projects/dejavu/>
+
+```{r set-deeptools-shell-vars}
+
+# data and params
+Sys.setenv(UPSTREAM=UPSTREAM,
+           DOWNSTREAM=DOWNSTREAM,
+           INTERP_SIGNAL_BW=INTERP_SIGNAL_BW,
+            PROMOTERS_HILO_BED_PATH=PROMOTERS_HILO_BED_PATH,
+            PROMOTERS_HILO_BED_PATH_A=PROMOTERS_HILO_BED_PATH_A,
+            PROMOTERS_HILO_BED_PATH_B=PROMOTERS_HILO_BED_PATH_B,
+            PROMOTERS_HILO_BED_PATH_C=PROMOTERS_HILO_BED_PATH_C,
+            PROMOTERS_HILO_BED_PATH_D=PROMOTERS_HILO_BED_PATH_D,
+            PROMOTERS_HILO_BED_PATH_A_TF=PROMOTERS_HILO_BED_PATH_A_TF,
+            PROMOTERS_HILO_BED_PATH_B_TF=PROMOTERS_HILO_BED_PATH_B_TF,
+            PROMOTERS_HILO_BED_PATH_C_TF=PROMOTERS_HILO_BED_PATH_C_TF,
+            PROMOTERS_HILO_BED_PATH_D_TF=PROMOTERS_HILO_BED_PATH_D_TF)
+
+# output files
+PROMOTERS_HILO_UPDOWN_MX = file.path(OUTPUT_03,
+                    sprintf("%s.promoters.hilo.updown.mx",params$stage))
+PROMOTERS_CLASSES_UPDOWN_MX = file.path(OUTPUT_03,
+                    sprintf("%s.promoters.hilo.CLASSES.mx",params$stage))
+PROMOTERS_TF_CLASSES_UPDOWN_MX = file.path(OUTPUT_03,
+                    sprintf("%s.promoters.hilo.TF.CLASSES.mx",params$stage))
+PROMOTERS_HILO_UPDOWN_PDF = file.path(OUTPUT_03,
+                    sprintf("%s.promoters.hilo.updown.pdf",params$stage))
+
+PROMOTERS_CLASSES_UPDOWN_PDF = file.path(OUTPUT_03,                                                       sprintf("%s.promoters.hilo.CLASSES.pdf",params$stage))
+PROMOTERS_TF_CLASSES_UPDOWN_PDF = file.path(OUTPUT_03,                                                       sprintf("%s.promoters.hilo.TF.CLASSES.pdf",params$stage))
+
+Sys.setenv(PROMOTERS_HILO_BED_PATH_UP=PROMOTERS_HILO_BED_PATH_UP,
+            PROMOTERS_HILO_BED_PATH_DOWN=PROMOTERS_HILO_BED_PATH_DOWN,
+            PROMOTERS_HILO_UPDOWN_MX=PROMOTERS_HILO_UPDOWN_MX,
+            PROMOTERS_CLASSES_UPDOWN_MX=PROMOTERS_CLASSES_UPDOWN_MX,
+            PROMOTERS_HILO_UPDOWN_PDF=PROMOTERS_HILO_UPDOWN_PDF,
+            PROMOTERS_CLASSES_UPDOWN_PDF=PROMOTERS_CLASSES_UPDOWN_PDF,
+           PROMOTERS_TF_CLASSES_UPDOWN_MX=PROMOTERS_TF_CLASSES_UPDOWN_MX,
+           PROMOTERS_TF_CLASSES_UPDOWN_PDF=PROMOTERS_TF_CLASSES_UPDOWN_PDF
+           )
+```
+
+```{bash deeptools-ABCD-wtf, eval=FALSE}
+source $HOME/.bash_profile
+conda activate derptools # yaml environ in 02_scripts/conda_envs
+pwd
+
+set -ue # exit 1 if any vars are not set (using Sys.setenv in prev chunks)
+echo PROMOTERS_HILO_BED_PATH $PROMOTERS_HILO_BED_PATH
+echo PROMOTERS_HILO_BED_PATH_A_TF $PROMOTERS_HILO_BED_PATH_A_TF
+echo PROMOTERS_HILO_BED_PATH_B_TF $PROMOTERS_HILO_BED_PATH_B_TF
+echo PROMOTERS_HILO_BED_PATH_C_TF $PROMOTERS_HILO_BED_PATH_C_TF
+echo PROMOTERS_HILO_BED_PATH_D_TF $PROMOTERS_HILO_BED_PATH_D_TF
+echo PROMOTERS_TF_CLASSES_UPDOWN_MX $PROMOTERS_TF_CLASSES_UPDOWN_MX
+echo PROMOTERS_TF_CLASSES_UPDOWN_PDF $PROMOTERS_TF_CLASSES_UPDOWN_PDF
+BODYLENGTH=$(($UPSTREAM + $DOWNSTREAM))
+
+# real	1m59.354s
+# user	3m47.980s
+# sys	0m2.663s
+if true
+then
+time computeMatrix scale-regions --regionBodyLength $BODYLENGTH \
+                                --startLabel 'up-1Kb' \
+                                --endLabel down+200 \
+                                --beforeRegionStartLength $UPSTREAM\
+                                --afterRegionStartLength $DOWNSTREAM\
+                                -R $PROMOTERS_HILO_BED_PATH_A_TF $PROMOTERS_HILO_BED_PATH_B_TF $PROMOTERS_HILO_BED_PATH_C_TF $PROMOTERS_HILO_BED_PATH_D_TF\
+                                -S $INTERP_SIGNAL_BW\
+                                -p 4 -o $PROMOTERS_TF_CLASSES_UPDOWN_MX
+fi
+plotHeatmap --plotTitle "WTF class A-D regions sorted by logFC expression high to low for ${STAGE}"\
+            --matrixFile $PROMOTERS_TF_CLASSES_UPDOWN_MX\
+             -out $PROMOTERS_TF_CLASSES_UPDOWN_PDF\
+             --sortRegions no\
+             --colorMap RdYlBu_r\
+             --startLabel '' --endLabel ''\
+             --regionsLabel 'peak+int. enrich.' 'peak+ NOT int. enrich.' 'NO peak + int. enrich.' 'NO peak + NOT int. enrich.'\
+             --samplesLabel 'ELT-2 signal (reps. combined subtracted)'\
+
+```
+
+```{bash deeptools-ABCD, echo = FALSE, eval=FALSE}
+source $HOME/.bash_profile
+conda activate derptools # yaml environ in 02_scripts/conda_envs
+pwd
+
+set -ue # exit 1 if any vars are not set (using Sys.setenv in prev chunks)
+echo PROMOTERS_HILO_BED_PATH $PROMOTERS_HILO_BED_PATH
+echo PROMOTERS_HILO_BED_PATH_A $PROMOTERS_HILO_BED_PATH_A
+echo PROMOTERS_HILO_BED_PATH_B $PROMOTERS_HILO_BED_PATH_B
+echo PROMOTERS_HILO_BED_PATH_C $PROMOTERS_HILO_BED_PATH_C
+echo PROMOTERS_HILO_BED_PATH_D $PROMOTERS_HILO_BED_PATH_D
+echo PROMOTERS_CLASSES_UPDOWN_MX $PROMOTERS_CLASSES_UPDOWN_MX
+echo PROMOTERS_CLASSES_UPDOWN_PDF $PROMOTERS_CLASSES_UPDOWN_PDF
+BODYLENGTH=$(($UPSTREAM + $DOWNSTREAM))
+
+# real	1m59.354s
+# user	3m47.980s
+# sys	0m2.663s
+if false
+then
+time computeMatrix scale-regions --regionBodyLength $BODYLENGTH \
+                                --startLabel 'up-1Kb' \
+                                --endLabel down+200 \
+                                --beforeRegionStartLength $UPSTREAM\
+                                --afterRegionStartLength $DOWNSTREAM\
+                                -R $PROMOTERS_HILO_BED_PATH_A $PROMOTERS_HILO_BED_PATH_B $PROMOTERS_HILO_BED_PATH_C $PROMOTERS_HILO_BED_PATH_D\
+                                -S $INTERP_SIGNAL_BW\
+                                -p 4 -o $PROMOTERS_CLASSES_UPDOWN_MX
+fi
+plotHeatmap --plotTitle "Promoter ChIP signal, class A-D regions sorted by logFC expression high to low for ${STAGE}"\
+            --matrixFile $PROMOTERS_CLASSES_UPDOWN_MX\
+             -out $PROMOTERS_CLASSES_UPDOWN_PDF\
+             --sortRegions no\
+             --colorMap RdYlBu_r\
+             --startLabel '' --endLabel ''\
+             --regionsLabel 'peak+int. enrich.' 'peak+ NOT int. enrich.' 'NO peak + int. enrich.' 'NO peak + NOT int. enrich.'\
+             --samplesLabel 'ELT-2 signal (reps. combined subtracted)'\
+             --yMax 300\
+             --yMin 0\
+             --zMax 300\
+             --zMin 0\
+```
+
+```{bash deeptools-hilo, echo = FALSE, eval=FALSE}
+source $HOME/.bash_profile
+conda activate derptools # yaml environ in 02_scripts/conda_envs
+BODYLENGTH=$(($UPSTREAM + $DOWNSTREAM))
+set -ue # exit 1 if any vars are not set (using Sys.setenv in prev chunks)
+echo PROMOTERS_HILO_UPDOWN_MX: $PROMOTERS_HILO_UPDOWN_MX
+echo PROMOTERS_HILO_UPDOWN_PDF: $PROMOTERS_HILO_UPDOWN_PDF
+if false
+then
+time computeMatrix scale-regions --regionBodyLength $BODYLENGTH \
+                            --startLabel 'up-1Kb' \
+                            --endLabel down+200 \
+                            --beforeRegionStartLength $UPSTREAM\
+                            --afterRegionStartLength $DOWNSTREAM\
+                            -R $PROMOTERS_HILO_BED_PATH_UP $PROMOTERS_HILO_BED_PATH_DOWN\
+                            -S $INTERP_SIGNAL_BW\
+                            -p 4 -o $PROMOTERS_HILO_UPDOWN_MX
+fi
+plotHeatmap  --plotTitle "Promoter ChIP signal, regions sorted by logFC expression high to low for ${STAGE}"\
+            --matrixFile $PROMOTERS_HILO_UPDOWN_MX\
+             -out $PROMOTERS_HILO_UPDOWN_PDF\
+             --sortRegions no\
+             --colorMap RdYlBu_r\
+             --startLabel '' --endLabel ''\
+             --regionsLabel 'log2FC > 0' 'log2FC < 0'\
+             --samplesLabel 'ELT-2 signal (reps. combined subtracted)'\
+             --yMin 0\
+             --yMax 200\
+             --zMin 0\
+             --zMax 200
+```
+
+```{r gene-centric-to-appease-derptools, echo = FALSE, eval = FALSE}
+# this code chunk is deactivated because the promoter-only visualization is better
+classA.genes = promoters.hilo[classA]$wbps_gene_id
+classB.genes = promoters.hilo[classB]$wbps_gene_id
+classC.genes = promoters.hilo[classC]$wbps_gene_id
+classD.genes = promoters.hilo[classD]$wbps_gene_id
+genes = getCElegansGeneLocs(mart, gene_list=NULL, WBID=c(classA.genes,classB.genes,classC.genes,classD.genes))
+
+names(genes) = genes$wbps_gene_id
+gr.classA.genes = genes[classA.genes]
+gr.classB.genes = genes[classB.genes]
+gr.classC.genes = genes[classC.genes]
+gr.classD.genes = genes[classD.genes]
+
+
+write.table(as.data.frame(gr.classA.genes), 
+            file.path(OUTPUT_03, "genes.classA.bed"), quote=F, sep="\t", row.names=F, col.names=F)
+write.table(as.data.frame(gr.classB.genes), 
+            file.path(OUTPUT_03, "genes.classB.bed"), quote=F, sep="\t", 
+row.names=F, col.names=F)
+write.table(as.data.frame(gr.classC.genes), 
+            file.path(OUTPUT_03, "genes.classC.bed"), quote=F, sep="\t", 
+row.names=F, col.names=F)
+write.table(as.data.frame(gr.classD.genes), 
+            file.path(OUTPUT_03, "genes.classD.bed"), quote=F, sep="\t", 
+row.names=F, col.names=F)
+```
+
+```{r signal-vs-expression plots}
+gr.promoters.classA = gr.promoters[classA]
+
+# scatter plot with linear mods on logFC up and down separately
+gr.promoters.classA %>% as.data.frame() %>% 
+  ggplot(
+    aes(x=log_chip_signal_max, 
+        y=log2FoldChange,
+        group=log2FoldChange>0)) + geom_point() +
+        geom_smooth(method='lm', formula= y~x) +
+        ggtitle("Peak + Intestine Enriched") 
+
+classA.up = promoters.hilo %>% as.data.frame() %>% dplyr::filter(classA & log2FoldChange > 0)
+up.table = classA.up[,c('log2FoldChange',
+                      'chip_signal_mean',
+                      'chip_signal_max',
+                      'log_chip_signal_mean', 
+                      'log_chip_signal_max',  
+                      'IDR_mean',   'IDR_max', 'IDR_value')]
+
+cor.up.table = cor(up.table)
+options(digits=3)
+knitr::kable(cor.up.table, caption="Pairwise correlations")
+```
+
+```{r cor.tests}
+cor.test(classA.up[,'log2FoldChange'],classA.up[,'IDR_mean'])
+cor.test(classA.up[,'log2FoldChange'],classA.up[,'log_chip_signal_mean'])
+```
+
+```{r session-info}
+sessionInfo()
+```

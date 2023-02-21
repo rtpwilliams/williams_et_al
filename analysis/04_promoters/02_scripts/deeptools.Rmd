@@ -1,0 +1,235 @@
+---
+title: "Deeps"
+author: "DC King - Onish lab"
+date: "3/28/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyr)
+library(dplyr)
+library(GenomicRanges)
+source('david-reader.R')
+```
+
+## ELT-2 data
+
+```{r read-data-ELT-2}
+elt2.data = read_ELT2_binding_data(as_genomic_ranges = FALSE)
+glimpse(elt2.data)
+```
+
+## Rob data
+
+```{r read-rob-merged}
+rob = read_rob_all_merged() %>% dplyr::select(-starts_with("pvalue."),-starts_with("lfcSE."))
+glimpse(rob)
+```
+
+```{r combine-elt-2-rnaseq}
+merge = right_join(rob, elt2.data, by = "WBGeneID")
+glimpse(merge)
+
+# Left-over genes are NA in alldata. Give them a label
+merge$embryo_int_exp[is.na(merge$embryo_int_exp)] = 'ftr'
+merge$L1_int_exp[is.na(merge$L1_int_exp)] = 'ftr'
+merge$L3_int_exp[is.na(merge$L3_int_exp)] = 'ftr'
+
+merge$embryo.boundEnrichedStatus = sprintf("%s.%s", ifelse(merge$LE_bound, "bound", "unbound"), merge$embryo_int_exp)
+merge$L1.boundEnrichedStatus = sprintf("%s.%s", ifelse(merge$L1_bound, "bound", "unbound"), merge$L1_int_exp)
+merge$L3.boundEnrichedStatus = sprintf("%s.%s", ifelse(merge$L3_bound, "bound", "unbound"), merge$L3_int_exp)
+
+```
+
+```{r make-stringent-classes}
+
+
+
+
+
+t(table(merge$LE.class,merge$embryo.boundEnrichedStatus))
+t(table(merge$L1.class,merge$L1.boundEnrichedStatus))
+t(table(merge$L3.class,merge$L3.boundEnrichedStatus))
+
+```
+
+```{r bools}
+
+# bools
+classA.LE = merge$embryo.boundEnrichedStatus == "bound.enriched"
+classB.LE = merge$embryo.boundEnrichedStatus %in% c("bound.equal", "bound.depleted", "bound.ftr")
+classC.LE = merge$embryo.boundEnrichedStatus == "unbound.enriched"
+classD.LE = merge$embryo.boundEnrichedStatus %in% c("unbound.equal", "unbound.depleted", "unbound.ftr")
+ 
+
+LEvec = character(length(classA.LE))
+LEvec[classA.LE] = "classA"
+LEvec[classB.LE] = "classB"
+LEvec[classC.LE] = "classC"
+LEvec[classD.LE] = "classD"
+
+# bools
+classA.L1 = merge$L1.boundEnrichedStatus == "bound.enriched"
+classB.L1 = merge$L1.boundEnrichedStatus %in% c("bound.equal", "bound.depleted", "bound.ftr")
+classC.L1 = merge$L1.boundEnrichedStatus == "unbound.enriched"
+classD.L1 = merge$L1.boundEnrichedStatus %in% c("unbound.equal", "unbound.depleted", "unbound.ftr")
+ 
+
+L1vec = character(length(classA.L1))
+L1vec[classA.L1] = "classA"
+L1vec[classB.L1] = "classB"
+L1vec[classC.L1] = "classC"
+L1vec[classD.L1] = "classD"
+
+# bools
+classA.L3 = merge$L3.boundEnrichedStatus == "bound.enriched"
+classB.L3 = merge$L3.boundEnrichedStatus %in% c("bound.equal", "bound.depleted", "bound.ftr")
+classC.L3 = merge$L3.boundEnrichedStatus == "unbound.enriched"
+classD.L3 = merge$L3.boundEnrichedStatus %in% c("unbound.equal", "unbound.depleted", "unbound.ftr")
+ 
+L3vec = character(length(classA.L3))
+L3vec[classA.L3] = "classA"
+L3vec[classB.L3] = "classB"
+L3vec[classC.L3] = "classC"
+L3vec[classD.L3] = "classD"
+
+merge$LE.class.v2 = LEvec
+merge$L1.class.v2 = L1vec
+merge$L3.class.v2 = L3vec
+```
+
+```{r class-barplots}
+class_lng = data.frame()
+ 
+
+tbl = table(LEvec)
+tbl
+df = as.data.frame(tbl)
+df$stage = "LE"
+colnames(df) <- c("class", "geneCounts", "stage")
+class_lng %<>% rbind(df)
+
+mx = matrix(c(tbl),nrow=2)
+dimnames(mx) <- list(ELT2.bound=c("yes","no"), int.enriched=c("yes","no"))
+mx.chi = chisq.test(mx)
+mx
+mx.chi$expected
+
+lng = data.frame(geneCounts=c(mx.chi$observed, mx.chi$expected), label=c("int.enriched/bound","int.enriched/unbound","NOT int.enriched/bound","NOT int.enriched/unbound"), obs.exp = c(rep("observed",4), rep("expected",4)))
+lng$obs.exp = factor(lng$obs.exp, levels=c("observed","expected"))
+
+ggplot(lng, aes(x=obs.exp, y=geneCounts, alpha=obs.exp)) + geom_bar(aes(fill=label),stat="identity",position=position_stack()) + scale_fill_brewer(palette="Spectral") + scale_y_break(c(14000,15000),scales=3) + scale_alpha_manual(values=c(1,.7), guide="none") + theme_classic()
+```
+
+
+```{r}
+
+
+tbl = table(L1vec)
+tbl
+df = as.data.frame(tbl)
+df$stage = "L1"
+colnames(df) <- c("class", "geneCounts", "stage")
+class_lng %<>% rbind(df)
+
+tbl = table(L3vec)
+df = as.data.frame(tbl)
+df$stage = "L3"
+colnames(df) <- c("class", "geneCounts", "stage")
+class_lng %<>% rbind(df)
+
+class_lng$stage = factor(class_lng$stage, levels=c("LE","L1","L3"))
+class_lng$class = factor(class_lng$class, levels=c("classA","classB","classC","classD"))
+ggplot(class_lng, aes(y=geneCounts,x=stage)) + geom_bar(aes(fill=class),stat="identity",position=position_stack()) + scale_y_break(c(5000,15000)) 
+
+mx = matrix(c(tbl),nrow=2)
+dimnames(mx) <- list(ELT2.bound=c("yes","no"), int.enriched=c("yes","no"))
+mx
+
+```
+
+
+```{r write-files}
+
+# zero out the dineen LFC that are NA's to 0. 
+merge[is.na(merge$din.log2FoldChange),'din.log2FoldChange'] <- 0
+
+merge.LEsort = merge %>% arrange(LE.class.v2, desc(din.log2FoldChange))
+merge.L1sort = merge %>% arrange(L1.class.v2, desc(din.log2FoldChange))
+merge.L3sort = merge %>% arrange(L3.class.v2, desc(din.log2FoldChange))
+
+merged.sorted = list(LE=merge.LEsort,
+                     L1=merge.L1sort,
+                     L3=merge.L3sort)
+
+alldata = GenomicRanges::makeGRangesFromDataFrame(merge, keep.extra.columns = T)
+seqinfo(alldata) <- Seqinfo(genome="ce11")
+
+# write all stages X classes
+
+for (stage in c("LE","L1","L3")) {
+  df  = merged.sorted[[ stage ]]
+  fieldname = paste(stage,".class.v2",sep='')
+  splt = split(df, df[[fieldname]])
+  for (cls in c("classA","classB","classC","classD")){
+    outfilename = paste(stage, cls, "v2.bed", sep=".")
+    tbl = splt[[cls]]
+    write.table(tbl[,c("seqnames","start","end","WBGeneID")], outfilename, sep="\t", quote=F, row.names = F, col.names = F)
+  }
+}
+```
+
+```{r pcoa}
+library(ade4)
+library(factoextra)
+cats = merge %>% mutate(embryo_int_enriched = embryo_int_exp == "enriched",
+                 L1_int_enriched = L1_int_exp == "enriched",
+                 L3_int_enriched = L3_int_exp == "enriched",
+                 down_ELT2_minus = din.status.description  == "down_ELT2_minus",
+                 unchanged_ELT2_minus = din.status.description == "unchanged_ELT2_minus",
+                 up_ELT2_minus = din.status.description == "up_ELT2_minus"
+                 ) %>%
+  dplyr::select(ends_with("bound"),
+                embryo_int_enriched,
+                L1_int_enriched,
+                L3_int_enriched,
+                down_ELT2_minus,
+                unchanged_ELT2_minus,
+                up_ELT2_minus)
+cats[is.na(cats)] = FALSE
+vals = apply(t(combn(ncol(cats),2)), 1,
+      FUN=function(x) {
+        a = cats[,x[1]]
+        b = cats[,x[2]]
+        sum(a & a==b)
+      })
+m = matrix(0, nrow = ncol(cats), ncol = ncol(cats))
+m[upper.tri(m)] <- vals
+m[lower.tri(m)] <- vals
+colnames(m) <- colnames(cats)
+rownames(m) <- colnames(cats)
+m.mod = m[1:6,1:6]
+cats.ca = dudi.coa(m, nf=4, scannf=FALSE)
+fviz_eig(cats.ca,geom="bar",bar_width=0.6)+ggtitle("")
+fviz_ca_row(cats.ca,axes = c(1, 2),geom="text", col.row="purple",
+  labelsize=3)+ggtitle("") + xlim(-0.55, 1.7) + ylim(-0.53,1.1) +
+  theme_bw() +  coord_fixed()
+fviz_ca_row(cats.ca,axes = c(1, 3),geom="text", col.row="purple",
+  labelsize=3)+ggtitle("") + xlim(-0.55, 1.7) + ylim(-0.53,1.1) +
+  theme_bw() +  coord_fixed()
+
+
+boundVenriched = m.mod[1:3,4:6]
+
+library("vcd")
+mosaicplot(boundVenriched,shade=TRUE,las=1,type="pearson",cex.axis=0.7,main="")
+
+boundVenriched.ca = dudi.coa(boundVenriched, nf=2, scannf=FALSE)
+fviz_eig(boundVenriched.ca,geom="bar",bar_width=0.6)+ggtitle("")
+
+fviz_ca_biplot(boundVenriched.ca,repel=TRUE,col.col="brown", col.row="purple") +
+ggtitle("") + ylim(c(-0.5,0.5))
+res.ca = vegan::cca(boundVenriched)
+plot(res.ca,scaling=3)
+```

@@ -1,0 +1,120 @@
+---
+title: "WormBase_Tissue_Specific_Genes"
+author: "Robert Williams"
+date: "2/20/2023"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Install Libraries
+```{r}
+# install.packages("tidyverse")
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# BiocManager::install(version = "3.14")
+# BiocManager::install("InterMineR")
+```
+
+
+Load Libraries
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(InterMineR)
+library(ComplexHeatmap)
+library(biomaRt)
+```
+
+# load genes lists from WormBase
+
+
+```{r}
+tissues <- c("intestine", "pharyngeal-intestinal-valve", "rectum", "coelomic-system", "reproductive-system", "excretory-system", "nervous-system", "epithelial-system", "muscular-system")
+tissue_paths <- c("../01_input/genes_direct_and_inferred_for_WBbt_0005772_intestine.txt",
+                  "../01_input/genes_direct_and_inferred_for_WBbt_0005767_pharyngeal-intestinal-valve.txt",
+                  "../01_input/genes_direct_and_inferred_for_WBbt_0005773_rectum.txt",
+                  "../01_input/genes_direct_and_inferred_for_WBbt_0005749_coelomic-system.txt",
+                  "../01_input/genes_direct_and_inferred_for_WBbt_0005747_reproductive-system.txt",
+                  "../01_input/genes_direct_and_inferred_for_WBbt_0005736_excretory-system.txt",
+                  "../01_input/genes_direct_and_inferred_for_WBbt_0005735_nervous-system.txt",
+                  "../01_input/genes_direct_and_inferred_for_WBbt_0005730_epithelial-system.txt",
+                  "../01_input/genes_direct_and_inferred_for_WBbt_0005737_muscular-system.txt"
+                  )
+gene_tissue_annotations <- data.frame()
+for(i in 1:length(tissues)){
+  # print(i)
+  # print(tissues[i])
+  # print(tissue_paths[i])
+  
+  gene_tissue_annotations <- data.frame(read_tsv(file = tissue_paths[i], 
+                        c("WBGeneID", "Sequence.name", "Species"),
+                        show_col_types = FALSE
+                        ),
+                        tissue = tissues[i]) %>%
+    bind_rows(gene_tissue_annotations)
+}
+table(gene_tissue_annotations$tissue)
+```
+# Add ubiquitous genes
+
+```{r}
+ub_genes <- read_csv(file = "../01_input/Rechtsteiner_et_al_2010_Table_S2.csv", col_names = "wormbase_gseq")
+
+paramart <- biomaRt::useMart("parasite_mart", dataset = "wbps_gene", host = "https://parasite.wormbase.org", port = 443)
+
+ub_genes <- biomaRt::getBM(
+  mart = paramart,
+  filter = c("wormbase_gseqname"),
+  value = ub_genes$wormbase_gseq,
+  attributes = c("wbps_gene_id","wormbase_gseq", "wikigene_name"))
+
+ub_genes<- ub_genes %>% rename(WBGeneID = "wbps_gene_id")
+```
+
+Remove ubiquitous genes from the tissue specific list and then add on ubiquitous genes
+```{r}
+gene_tissue_annotations <- gene_tissue_annotations %>% filter(!(WBGeneID %in% ub_genes$WBGeneID)) %>%
+  bind_rows(data.frame(WBGeneID = ub_genes[,colnames(ub_genes) == "WBGeneID"], Sequence.name = ub_genes[,colnames(ub_genes) == "wikigene_name"],Species = "Caenorhabditis elegans", tissue = "ubiquitous"))
+
+head(gene_tissue_annotations)
+```
+
+Select for genes with one tissue annottaion
+```{r}
+tissue_specific_genes <- gene_tissue_annotations %>% group_by(WBGeneID) %>% summarise(sum_tissues = n_distinct(tissue)) %>% filter(sum_tissues == 1) %>% left_join(gene_tissue_annotations, by = "WBGeneID")
+
+head(tissue_specific_genes)
+```
+
+Keep only protein-coding genes
+```{r}
+transcript_type <- read_csv(file = "../01_input/biomaRt_elegans_transcript_biotype.csv")
+colnames(transcript_type) <- c("WBGeneID", "genome_id", "gene_name", "biotype")
+transcript_type %>% distinct(WBGeneID, .keep_all = TRUE) %>%group_by(biotype) %>% summarise(n())
+
+tissue_specific_genes_protein <- tissue_specific_genes %>% 
+  filter(WBGeneID %in% (transcript_type %>% 
+                          filter(biotype == "protein_coding") %>% 
+                          pull(WBGeneID)
+                        )
+         )
+nrow(tissue_specific_genes_protein)
+```
+
+# export the tissue specific gene dataframe
+
+```{r}
+write_csv(tissue_specific_genes_protein %>% dplyr::select(-sum_tissues, -Species), file = "../03_output/tissue_specific_genes_220202.csv", col_names = TRUE)
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+
